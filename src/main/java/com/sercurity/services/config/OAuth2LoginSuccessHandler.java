@@ -84,7 +84,7 @@ public class OAuth2LoginSuccessHandler extends SavedRequestAwareAuthenticationSu
                         newUser.setEmail(email);
                         newUser.setUserName(username);
                         newUser.setSignUpMethod(oAuth2AuthenticationToken.getAuthorizedClientRegistrationId());
-                        userService.registerUser(newUser);
+                        userService.registerUserFromOauth(newUser);
                         DefaultOAuth2User oauthUser = new DefaultOAuth2User(
                                 List.of(new SimpleGrantedAuthority(newUser.getRole().getRoleName().name())),
                                 attributes,
@@ -124,7 +124,7 @@ public class OAuth2LoginSuccessHandler extends SavedRequestAwareAuthenticationSu
         String jwtToken = jwtUtils.generateTokenFromUsername(userDetails);
 
         // Redirect to the frontend with the JWT token
-        String targetUrl = UriComponentsBuilder.fromUriString("/oauth/success")
+        String targetUrl = UriComponentsBuilder.fromUriString("/public/oauth/success")
                 .queryParam("token", jwtToken)
                 .build().toUriString();
         this.setDefaultTargetUrl(targetUrl);

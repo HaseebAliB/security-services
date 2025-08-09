@@ -1,87 +1,138 @@
 package com.sercurity.services.services;
 
-import com.sercurity.services.dtos.LoginRequest;
-import com.sercurity.services.dtos.LoginResponse;
+import com.sercurity.services.config.RedisCachingService;
+import com.sercurity.services.dtos.UserDto;
+import com.sercurity.services.dtos.UserResponseDto;
+import com.sercurity.services.entitymappers.UserMapper;
 import com.sercurity.services.models.User;
 import com.sercurity.services.repositories.RoleRepository;
 import com.sercurity.services.repositories.UserRepository;
-import com.sercurity.services.utils.JwtUtils;
+import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.AuthenticationException;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.time.LocalDate;
 import java.util.Optional;
-import java.util.stream.Collectors;
+import java.util.function.Consumer;
 
 @Service
 public class UserServiceImpl implements UserService {
-    @Autowired
-    JwtUtils jwtUtils;
-
-    @Autowired
-    AuthenticationManager authenticationManager;
 
     @Autowired
     UserRepository userRepository;
 
     @Autowired
+    PasswordEncoder encoder;
+
+    @Autowired
     RoleRepository roleRepository;
 
     @Autowired
-    PasswordEncoder encoder;
-    @Override
-    public LoginResponse signin(LoginRequest loginRequest) throws Exception {
-        Authentication authentication;
-        try {
-            authentication = authenticationManager
-                    .authenticate(new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword()));
-        } catch (AuthenticationException exception) {
-            Map<String, Object> map = new HashMap<>();
-            map.put("message", "Bad credentials");
-            map.put("status", false);
-            return null;
-        }
+    private RedisCachingService cachingService;
 
-//      Set the authentication
-        SecurityContextHolder.getContext().setAuthentication(authentication);
 
-        UserDetails userDetails = (UserDetails) authentication.getPrincipal();
-
-        String jwtToken = jwtUtils.generateTokenFromUsername(userDetails);
-
-        // Collect roles from the UserDetails
-        List<String> roles = userDetails.getAuthorities().stream()
-                .map(item -> item.getAuthority())
-                .collect(Collectors.toList());
-
-        // Prepare the response body, now including the JWT token directly in the body
-        LoginResponse response = new LoginResponse(jwtToken,userDetails.getUsername(),
-                roles);
-
-        // Return the response entity with the JWT token included in the response body
-        return response;
-    }
 
     @Override
     public Optional<User> findByUserName(String username){
+        UserDto userDto = cachingService.get(username, UserDto.class);
+        if (userDto != null) {
+            User user = UserMapper.toEntity(userDto);
+            return Optional.of(user);
+        }
         return userRepository.findByUserName(username);
 
     }
     @Override
-    public User registerUser(User user){
+    @Transactional
+    public User registerUserFromOauth(User user){
         if (user.getPassword() != null)
             user.setPassword(encoder.encode(user.getPassword()));
+
+        cachingService.set(user.getUserName(), UserMapper.toDto(user));
         return userRepository.save(user);
+    }
+
+    @Override
+    @Transactional
+    public UserResponseDto createUser(UserDto userDto) {
+        findByUserName(userDto.getUsername()).ifPresent( user -> {
+            throw new RuntimeException("User already exists with username: " + userDto.getUsername());
+        });
+
+       User user = User.builder().userName(userDto.getUsername()).email(userDto.getEmail())
+                .password(encoder.encode(userDto.getPassword()))
+                .role(roleRepository.findByRoleName(userDto.getRole()).get())
+                .accountNonLocked(false)
+                .accountNonExpired(true)
+                .enabled(true)
+                .credentialsExpiryDate(LocalDate.now().plusYears(1))
+                .accountExpiryDate(LocalDate.now().plusYears(1))
+                .isTwoFactorEnabled(false)
+                .signUpMethod("email")
+                .build();
+
+            User newUser = userRepository.save(user);
+            cachingService.set(newUser.getUserName(), UserMapper.toDto(newUser));
+
+        return UserDto.buildResponse(userDto);
+
+    }
+
+    @Override
+    @Transactional
+    public UserResponseDto updateUser(UserDto userDto) {
+        User user =   findByUserName(userDto.getUsername())
+                .orElseThrow( () -> new RuntimeException("User not found with username: " + userDto.getUsername()));
+
+
+        User.UserBuilder builder = User.builder();
+
+        builder.userId(user.getUserId());
+
+        setIfNotNull(builder::userName, userDto.getUsername(), user.getUserName());
+        setIfNotNull(builder::email, userDto.getEmail(),user.getEmail());
+        setIfNotNull(pw -> builder.password(encoder.encode(pw)), userDto.getPassword(), user.getPassword());
+
+        if (userDto.getRole() != null) {
+            builder.role(roleRepository.findByRoleName(userDto.getRole()).orElse(user.getRole()));
+        }
+
+// fixed values
+        builder.accountNonLocked(false)
+                .accountNonExpired(true)
+                .enabled(true)
+                .credentialsExpiryDate(LocalDate.now().plusYears(1))
+                .accountExpiryDate(LocalDate.now().plusYears(1))
+                .isTwoFactorEnabled(false)
+                .signUpMethod("email");
+
+        User  newUser = userRepository.save(builder.build());
+        cachingService.set(newUser.getUserName(), UserMapper.toDto(newUser));
+
+
+        return UserDto.buildResponse(userDto);
+
+    }
+
+    @Override
+    @Transactional
+    public Boolean deleteUser(String userName) {
+      User user =   findByUserName(userName)
+                .orElseThrow( () -> new RuntimeException("User not found with username: " + userName));
+
+      cachingService.delete(user.getUserName());
+      userRepository.delete(user);
+
+      return true;
+    }
+
+
+    private <T> void setIfNotNull(Consumer<T> setter, T newValue,T existingValue ) {
+        if (newValue != null) {
+            setter.accept(newValue);
+        }else {
+            setter.accept(existingValue);
+        }
     }
 }
